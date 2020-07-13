@@ -131,8 +131,6 @@ use crate::extern_paths::ExternPaths;
 use crate::ident::to_snake;
 use crate::message_graph::MessageGraph;
 
-type Module = Vec<String>;
-
 /// A service generator takes a service descriptor and generates Rust code.
 ///
 /// `ServiceGenerator` can be used to generate application-specific interfaces
@@ -558,9 +556,9 @@ impl Config {
             )
         })?;
 
-        let modules = self.generate(descriptor_set.file)?;
+        let modules = self.generate(descriptor_set)?.modules;
         for (module, content) in modules {
-            let mut filename = module.join(".");
+            let mut filename = module.name().join(".");
             filename.push_str(".rs");
 
             let output_path = target.join(&filename);
@@ -581,7 +579,13 @@ impl Config {
         Ok(())
     }
 
-    fn generate(&mut self, files: Vec<FileDescriptorProto>) -> Result<HashMap<Module, String>> {
+    /// An alternative to compile_protos which will not invoke protoc.  This will take the provided
+    /// FileDescriptorSet and return a map of `Module`s to `String`s, where the string represents
+    /// the content to be included in the module.
+    ///
+    /// panics if FileDescriptorSet does not have source_code_info.
+    pub fn generate(&mut self, descriptor_set: FileDescriptorSet) -> Result<CodeGeneration> {
+        let files = descriptor_set.file;
         let mut modules = HashMap::new();
         let mut packages = HashMap::new();
 
@@ -591,7 +595,7 @@ impl Config {
             .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?;
 
         for file in files {
-            let module = self.module(&file);
+            let module = Module::from_file_descriptor(&file);
 
             // Only record packages that have services
             if !file.service.is_empty() {
@@ -609,16 +613,43 @@ impl Config {
             }
         }
 
-        Ok(modules)
+        Ok(CodeGeneration { modules })
+    }
+}
+
+#[derive(Clone, Eq, Hash, PartialEq, PartialOrd)]
+pub struct Module {
+    name: Vec<String>,
+}
+
+impl Module {
+    /// Constructs a Module from the provided file descriptor proto, using its package name.  Each
+    /// subpackage creates a submodule.
+    fn from_file_descriptor(file: &FileDescriptorProto) -> Module {
+        Module {
+            name: file
+                .package()
+                .split('.')
+                .filter(|s| !s.is_empty())
+                .map(to_snake)
+                .collect(),
+        }
     }
 
-    fn module(&self, file: &FileDescriptorProto) -> Module {
-        file.package()
-            .split('.')
-            .filter(|s| !s.is_empty())
-            .map(to_snake)
-            .collect()
+    /// Provides the module name, broken down by submodule.
+    ///
+    /// For example, google::protobuf::compiler would result in ["google", "protobuf", "compiler"].
+    pub fn name(&self) -> Vec<&str> {
+        self.name.iter().map(|x| x.as_str()).collect()
     }
+}
+
+pub struct CodeGeneration {
+    /// The generated code that should be output into a rust module.
+    pub modules: HashMap<Module, String>,
+    // TODO: add `paths` field to the struct that has a map of all protobuf paths generated
+    // from a FileDescriptorSet into their rust identifiers.  The goal being that this could be used
+    // in calls to extern_paths in later calls to prost-build.
 }
 
 impl default::Default for Config {
